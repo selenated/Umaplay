@@ -944,7 +944,7 @@ class RaceFlow:
             logger_uma.debug(
                 "[race] Looking for button_green 'Next' button. Shown after race."
             )
-            self.waiter.click_when(
+            ck1 = self.waiter.click_when(
                 classes=("button_green",),
                 texts=("NEXT",),
                 forbid_texts=("TRY AGAIN",),
@@ -960,7 +960,7 @@ class RaceFlow:
                 "[race] Looking for race_after_next special button. When Pyramid"
             )
 
-            self.waiter.click_when(
+            ck2 = self.waiter.click_when(
                 classes=("race_after_next",),
                 texts=("NEXT",),
                 prefer_bottom=True,
@@ -968,6 +968,16 @@ class RaceFlow:
                 clicks=random.randint(2, 4),
                 tag="race_after",
             )
+
+            if not ck1 and not ck2:
+                # quick and dirty fallback for MANT
+                screen_width = img.width
+                screen_height = img.height
+                cx = screen_width * 0.5
+                y = screen_height * 0.1
+
+                logger_uma.debug("[race] Trying MANT fallback click");
+                self.ctrl.click_xyxy_center((cx, y, cx, y), clicks=1)
 
             # Optional: Confirm 'Next'. TODO understand when to use
             # self.waiter.click_when(
