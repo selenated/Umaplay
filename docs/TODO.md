@@ -6,16 +6,13 @@ This organizes the mixed notes into a clear, actionable backlog. Items are group
 
 ## 0.4
 
-### 0.4.1
-
 
 
 ### 0.4.2
 
-
 Bug:
+- Try again race bug, pressing 'RACE' instead
 - @Rosetta: it is confusing hanshin juvenively for Asahi hai, if asahi hai is first. Japanese oaks and yushun... Maybe do a full read and go back
-- it is not respecting the blue explosions restrictions.?
 
 ADB:
 - Bluestack bugfixes and validation @Pure Fox and others
@@ -172,6 +169,27 @@ add a check like 'if support type, then you must have support bar, otherwise try
 
 
 - Weird error check thread, air grove, and infirmary, Rocostre thread: https://discord.com/channels/1100600632659943487/1438783548390641789
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\GitHub\UmAutoplay\main.py", line 333, in _runner
+    self.agent_scenario.run(
+  File "D:\GitHub\UmAutoplay\core\actions\unity_cup\agent.py", line 486, in run
+    if self.waiter.seen(
+  File "D:\GitHub\UmAutoplay\core\utils\waiter.py", line 247, in seen
+    img, dets = self._snap(tag=tag or (self.cfg.tag + "_seen"))
+  File "D:\GitHub\UmAutoplay\core\utils\waiter.py", line 354, in _snap
+    img, _, dets = self.yolo_engine.recognize(
+  File "D:\GitHub\UmAutoplay\core\perception\yolo\yolo_local.py", line 187, in recognize
+    img = self.ctrl.screenshot(region=region)
+  File "D:\GitHub\UmAutoplay\core\controllers\adb.py", line 251, in screenshot
+    result = self._adb_command("exec-out", "screencap", "-p", text=False)
+  File "D:\GitHub\UmAutoplay\core\controllers\adb.py", line 60, in _adb_command
+    raise RuntimeError(f"ADB command timed out: {' '.join(cmd)}") from exc
+RuntimeError: ADB command timed out: adb -s localhost:5555 exec-out screencap -p
+
+
 ### 0.4.3
 optimize CNN predicts with ONNX runtime for CPU automatically
 
@@ -434,10 +452,19 @@ Skill buying:
 - @Only: I do get a lot of [skills] skipping 'Medium Straightaways ◎' grade='◎' (already purchased) when it is still ○ [1/2] . Now properly handle in memory if we buy twice, once per grade. OCR still can't detect the symbol so relying in memory
 - @Rosetta/@Unknown: increased confidence from 0.75 to 0.85, and added positive/negative tokens for more skills like 'ABC corners/straightaway'  'frenzied ABC', 'Subdued ...', 'Flustered ...' 'Hesitant ...' etc
 
-
 Events:
 - Added card 30063-ikuno-dictus
 - Added characters 102801-hishi-akebono, 101901-agnes-digital
 
 Bot Strategy (URA):
 - Adjusted risk for URA, was overcalculating dynamic risk
+
+
+### 0.4.2
+
+Team Trials automation:
+- Solved Bug where it loops on the 'race go' screen
+
+Smart Falcon:
+- was losing all careers if no junior race win 'Pre-op or above' goal condition now supported
+

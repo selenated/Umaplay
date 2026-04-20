@@ -1055,6 +1055,12 @@ class LobbyFlow(ABC):
 
         goal = (self.state.goal or "").lower()
 
+        # If the UI already shows the goal as achieved, do not trigger
+        # any special racing logic for this goal.
+        goal_achieved = fuzzy_contains(goal, "achieved", 0.7)
+        if goal_achieved:
+            return False, "Goal already achieved"
+
         there_is_progress_text = fuzzy_contains(goal, "progress", threshold=0.58)
         
         # Detect "Win Maiden race" or similar race-winning goals
@@ -1064,22 +1070,37 @@ class LobbyFlow(ABC):
             and fuzzy_contains(goal, "race", 0.7)
         )
         
-        critical_goal_fans = there_is_progress_text or critical_goal_win_race or (
-            fuzzy_contains(goal, "go", 0.7)
-            and fuzzy_contains(goal, "fan", 0.7)
-            and not fuzzy_contains(goal, "achieve", 0.7)
-        )
-        critical_goal_g1 = there_is_progress_text and (
-            (fuzzy_contains(goal, "g1", 0.7) or fuzzy_contains(goal, "gl", 0.7))
-            or fuzzy_contains(goal, "place within", 0.7)
+        critical_goal_preop_rank = there_is_progress_text and fuzzy_contains(goal, "pre-op", 0.7) or fuzzy_contains(goal, "pre op", 0.7)
+        
+        critical_goal_fans = (
+            there_is_progress_text
+            or critical_goal_win_race
+            or critical_goal_preop_rank
             or (
-                fuzzy_contains(goal, "place", 0.7)
-                and fuzzy_contains(goal, "top", 0.7)
-                and fuzzy_contains(goal, "time", 0.7)
+                fuzzy_contains(goal, "go", 0.7)
+                and fuzzy_contains(goal, "fan", 0.7)
+                and not fuzzy_contains(goal, "achieve", 0.7)
+            )
+        )
+        # Guard: when we already detected a Pre-OP style goal, do not also
+        # treat it as a G1 placement goal. This keeps "Pre-OP or above" goals
+        # on the FANS/MAIDEN path so RaceFlow can pick non-G1 races (e.g. Maiden)
+        # when no G1 is available.
+        critical_goal_g1 = (
+            there_is_progress_text
+            and not critical_goal_preop_rank
+            and (
+                (fuzzy_contains(goal, "g1", 0.7) or fuzzy_contains(goal, "gl", 0.7))
+                or fuzzy_contains(goal, "place within", 0.7)
+                or (
+                    fuzzy_contains(goal, "place", 0.7)
+                    and fuzzy_contains(goal, "top", 0.7)
+                    and fuzzy_contains(goal, "time", 0.7)
+                )
             )
         )
 
-        # Skip racing right at the first junior date (matching your original constraint)
+        # Skip racing right at the very first junior date (matching your original constraint)
         is_first_junior_date = (
             bool(self.state.date_info)
             and self.state.date_info.year_code == 1

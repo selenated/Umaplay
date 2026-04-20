@@ -4,7 +4,15 @@ from typing import Any, Optional, Tuple, Union
 
 import random
 import time
-import pyautogui
+
+# pyautogui is cross-platform
+try:
+    import pyautogui
+    HAS_PYAUTOGUI = True
+except ImportError:
+    pyautogui = None  # type: ignore
+    HAS_PYAUTOGUI = False
+
 from PIL import ImageGrab, Image
 
 from core.types import XYXY, RegionXYWH

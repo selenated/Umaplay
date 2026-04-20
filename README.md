@@ -59,7 +59,7 @@ I take no responsibility for bans, issues, or account losses that may result fro
 * **Races** – Schedule in advance and auto-pick optimal races.
 * **Skills** – Buys and prioritizes selected skills automatically.
 * **Goals & Styles** – Handles special goals and lets you set racing style.
-* **Cross-Platform** – Works on PC (Steam) and Android (scrcpy/Bluestacks); resolution independent but OCR works better on bigger resolutions.
+* **Cross-Platform** – Works on PC (Steam), Android (scrcpy/Bluestacks), and **Linux via Wine**; resolution independent but OCR works better on bigger resolutions.
 * **Claw Machine** – Supports the claw mini-game.
 * **Hints** – Prioritize skill hints when enabled, with automatic de-prioritization when the skill is already learned.
 * **Skill Memory** – Tracks purchased skills per run to prevent double-buying single-circle variants and coordinate hint scoring.
@@ -83,7 +83,9 @@ Make sure you meet these conditions:
 
 ## 🚀 Getting Started
 
-### Installation
+### Installation (Windows)
+
+> **Linux/Wine Users:** See [Wine Setup Guide](docs/README.wine.md) for Linux-specific installation instructions.
 
 ### 🛠️ Required Software Installation
 

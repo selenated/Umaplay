@@ -186,8 +186,10 @@ class DailyRaceFlow:
             # Then green to continue
             if self.waiter.click_when(
                 classes=("button_green",),
-                prefer_bottom=True,
+                prefer_bottom=False,
+                allow_greedy_click=False,
                 timeout_s=2.0,
+                forbid_texts=("SHOP",),
                 tag="daily_race_after_results_green",
             ):
                 logger_uma.info("[DailyRace] Results: continued")
@@ -257,3 +259,16 @@ class DailyRaceFlow:
                         race_again = False
                     continue
         return finalized
+
+    def handle_shop_in_place(self) -> None:
+        did_shop = nav.handle_shop_exchange(
+            self.waiter,
+            self.yolo_engine,
+            self.ctrl,
+            tag_prefix="daily_race_shop_resume",
+            ensure_enter=False,
+        )
+        if did_shop:
+            logger_uma.info("[DailyRace] Completed shop exchange flow (resume)")
+        else:
+            logger_uma.warning("[DailyRace] Unable to process shop exchange (resume)")

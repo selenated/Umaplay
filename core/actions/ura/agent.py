@@ -599,7 +599,7 @@ class AgentURA(AgentScenario):
                 logger_uma.debug(
                     f"Claw Machine detected... starting to play. Claw turn: {self.claw_turn}"
                 )
-                if self.claw_game.play_once(tag_prefix="claw"):
+                if self.claw_game.play_once(tag_prefix="claw", try_idx=self.claw_turn):
                     logger_uma.debug("Claw Machine triggered sucessfully")
                 else:
                     logger_uma.error("Couldn't trigger Claw Machine")

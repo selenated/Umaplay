@@ -228,14 +228,22 @@ def _confirm_exchange_dialog(waiter: Waiter, tag_prefix: str) -> bool:
     return True
 
 def end_sale_dialog(waiter: Waiter, tag_prefix: str) -> bool:
-    if not waiter.click_when(
+    clicked_end = waiter.click_when(
         classes=("button_white",),
         texts=("END SALE",),
         prefer_bottom=False,
         timeout_s=2.0,
         allow_greedy_click=False,
         tag=f"{tag_prefix}_end_sale",
-    ):
+    )
+    if not clicked_end:
+        waiter.click_when(
+            classes=("ui_race",),
+            prefer_bottom=True,
+            timeout_s=2.0,
+            allow_greedy_click=True,
+            tag=f"{tag_prefix}_race_fallback",
+        )
         return False
 
     sleep(0.7)
@@ -273,18 +281,30 @@ def handle_shop_exchange(
 
     shop_appeared = True
     if ensure_enter:
-        shop_appeared = waiter.click_when(
-            classes=("button_green",),
-            texts=("SHOP",),
-            prefer_bottom=False,
-            allow_greedy_click=False,
-            timeout_s=8.0,
-            clicks=2,
-            tag=f"{tag_prefix}_enter",
+        _img, dets_pre = collect_snapshot(
+            waiter, yolo_engine, tag=f"{tag_prefix}_precheck"
         )
-        if not shop_appeared:
-            return False
-        sleep(2.5)
+        in_shop_already = bool(rows_top_to_bottom(dets_pre, "shop_row")) or has(
+            dets_pre, "shop_clock", conf_min=0.30
+        ) or has(dets_pre, "shop_exchange", conf_min=0.30)
+
+        if in_shop_already:
+            logger_uma.debug(
+                "[nav] shop: detected existing shop UI, skipping 'SHOP' enter click"
+            )
+        else:
+            shop_appeared = waiter.click_when(
+                classes=("button_green",),
+                texts=("SHOP",),
+                prefer_bottom=False,
+                allow_greedy_click=True,
+                timeout_s=8.0,
+                clicks=2,
+                tag=f"{tag_prefix}_enter",
+            )
+            if not shop_appeared:
+                return False
+            sleep(2.5)
     else:
         sleep(1.0)
 

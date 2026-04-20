@@ -71,6 +71,13 @@ class ClawConfig:
     conf: float = 0.55
     iou: float = 0.45
 
+    # Pre-scan of belt before starting (camera swipe while claw is idle)
+    scan_enabled: bool = True
+    scan_steps: int = 1  # extra views after the initial one; total = scan_steps + 1
+    scan_drag_frac_of_width: float = 0.30  # drag this fraction of client width per step
+    scan_pause_s: float = 0.25  # pause after each swipe before capturing
+    scan_mid_y_frac: float = 0.55  # vertical position (0-1) for swipe line
+
     # Plushie selection constraints
     tall_ratio_min: float = 1.05  # H/W must be ≥ this to be “vertical”
     max_plushie_width_vs_claw: float = 0.80  # plushie_w ≤ 0.80 × claw_w
@@ -80,8 +87,8 @@ class ClawConfig:
 
     # Alignment / timing
     # IMPORTANT: right bias defaults to the SAME fraction as tolerance
-    align_tol_frac_of_claw: float = -0.55  # tolerance band = 0.20 × claw_w
-    right_bias_frac_of_claw: float = -0.55  # bias the target = +0.20 × claw_w
+    align_tol_frac_of_claw: float = 0.25  # tolerance band = 0.20 × claw_w
+    right_bias_frac_of_claw: float = 0.05  # bias the target = +0.20 × claw_w
     max_hold_s: float = 6.5  # hard stop
     poll_interval_s: float = 0.015  # ~60 FPS
     # Prediction to compensate capture+inference latency
@@ -169,6 +176,22 @@ class ClawGame:
             except Exception:
                 pass
 
+    def _swipe_horizontal(
+        self,
+        x_start: int,
+        y: int,
+        x_end: int,
+        *,
+        duration: float = 0.30,
+    ) -> None:
+        """Simple drag gesture in SCREEN coordinates used during pre-scan."""
+        try:
+            self._down(x_start, y)
+            self.ctrl.move_to(x_end, y, duration=duration)
+            time.sleep(0.03)
+        finally:
+            self._up(x_end, y)
+
     # ---------------------------
     # Selection & filtering
     # ---------------------------
@@ -242,6 +265,128 @@ class ClawGame:
                 if r1 >= r0 + self.cfg.prefer_taller_margin:
                     choice, r0 = p, r1
         return choice
+
+    def _scan_plushies(
+        self,
+        img0: Image.Image,
+        dets0: List[Detection],
+        *,
+        claw_xyxy0: XYXY,
+        btn_xyxy: XYXY,
+        tag_prefix: str,
+    ) -> Optional[Dict[str, float]]:
+        """Optional pre-scan before pressing the button.
+
+        Swipes the camera horizontally a few times while the claw is idle, running
+        YOLO on each view to build a simple profile of plushies on the belt.
+
+        Returns a small dict with the preferred plushie profile
+        (aspect_ratio, width_vs_claw, page, local index) or None.
+        """
+
+        if not self.cfg.scan_enabled or self.cfg.scan_steps <= 0:
+            return None
+
+        cw0, _ = _wh(claw_xyxy0)
+        if cw0 <= 0.0:
+            return None
+
+        all_entries: List[Tuple[float, Detection, int, int]] = []
+
+        def _accumulate_page(
+            pil_img: Image.Image, dets: List[Detection], page_idx: int
+        ) -> None:
+            plush = det_find(dets, "claw_plushie")
+            if not plush:
+                return
+
+            ordered = _ltr_sort(plush)
+            for local_idx, p in enumerate(ordered):
+                pw, ph = _wh(p["xyxy"])
+                if pw <= 0.0 or ph <= 0.0:
+                    continue
+                aspect = ph / pw
+                width_vs_claw = pw / cw0
+
+                # Basic guardrails: ignore clearly flat or extremely wide ones.
+                if aspect < 0.7:
+                    continue
+
+                # Score: prefer taller and not too wide vs claw.
+                score = aspect - 0.5 * max(0.0, width_vs_claw - 0.5)
+                all_entries.append((score, p, page_idx, local_idx))
+
+            # Debug capture for this page
+            self._save_debug(
+                pil_img,
+                btn={"xyxy": btn_xyxy},
+                claw={"xyxy": claw_xyxy0},
+                plushies=ordered,
+                notes=f"SCAN page={page_idx}",
+                suffix=f"scan_{page_idx}",
+            )
+
+        # Initial (centered) view
+        _accumulate_page(img0, dets0, 0)
+
+        # Determine swipe geometry in screen coords
+        L, T, W, H = self.ctrl.capture_bbox()
+        if W > 0 and H > 0:
+            mid_y = int(T + H * self.cfg.scan_mid_y_frac)
+            start_x = int(L + 0.7 * W)
+            dx = int(max(8, self.cfg.scan_drag_frac_of_width * W))
+        else:
+            # Fallback: use full screen resolution if bbox is unavailable
+            scr_w, scr_h = self.ctrl.resolution()
+            mid_y = int(scr_h * self.cfg.scan_mid_y_frac)
+            start_x = int(0.7 * scr_w)
+            dx = int(max(8, self.cfg.scan_drag_frac_of_width * scr_w))
+
+        # Extra views by swiping left (camera moves right)
+        for step in range(1, self.cfg.scan_steps + 1):
+            if abort_requested():
+                break
+
+            x_end = start_x - dx
+            self._swipe_horizontal(start_x, mid_y, x_end)
+            time.sleep(self.cfg.scan_pause_s)
+
+            img_s, dets_s = collect(
+                self.yolo_engine,
+                imgsz=self.cfg.imgsz,
+                conf=self.cfg.conf,
+                iou=self.cfg.iou,
+                tag=f"{tag_prefix}_scan{step}",
+            )
+            _accumulate_page(img_s, dets_s, step)
+
+        if not all_entries:
+            logger_uma.info("[claw] pre-scan found no plushies.")
+            return None
+
+        # Highest-score plushie across all pages
+        all_entries.sort(key=lambda t: t[0], reverse=True)
+        best_score, best_det, best_page, best_local = all_entries[0]
+        pw, ph = _wh(best_det["xyxy"])
+        aspect = ph / max(pw, 1.0)
+        width_vs_claw = pw / max(cw0, 1.0)
+
+        logger_uma.info(
+            "[claw] pre-scan best: page=%d idx=%d aspect=%.2f width_vs_claw=%.2f score=%.3f (n=%d)",
+            best_page,
+            best_local,
+            aspect,
+            width_vs_claw,
+            best_score,
+            len(all_entries),
+        )
+
+        return {
+            "aspect": aspect,
+            "width_vs_claw": width_vs_claw,
+            "page": float(best_page),
+            "index": float(best_local),
+        }
 
     # ---------------------------
     # Debug helpers
@@ -354,6 +499,28 @@ class ClawGame:
         btn = _ltr_sort(btns)[0]
         claw_xyxy = claws[0]["xyxy"]
 
+        # Optional pre-scan: swipe camera while idle to build plushie profile.
+        scan_profile: Optional[Dict[str, float]] = None
+        if self.cfg.scan_enabled:
+            try:
+                scan_profile = self._scan_plushies(
+                    img,
+                    dets,
+                    claw_xyxy0=claw_xyxy,
+                    btn_xyxy=btn["xyxy"],
+                    tag_prefix=tag_prefix,
+                )
+                if scan_profile is not None:
+                    logger_uma.debug(
+                        "[claw] scan profile: aspect=%.2f width_vs_claw=%.2f page=%s idx=%s",
+                        scan_profile.get("aspect", 0.0),
+                        scan_profile.get("width_vs_claw", 0.0),
+                        scan_profile.get("page"),
+                        scan_profile.get("index"),
+                    )
+            except Exception as e:
+                logger_uma.warning("[claw] pre-scan failed: %s", e)
+
         # Press & hold at the button (convert local → SCREEN coords via controller).
         bx_screen, by_screen = self.ctrl.center_from_xyxy(btn["xyxy"])
         self._down(bx_screen, by_screen)
@@ -379,11 +546,11 @@ class ClawGame:
         sticky_left = 0  # Avoid rapid flicker (frames)
 
         # Try-aware tuning: later tries release a bit earlier
-        # - more look-ahead, bigger tolerance, slightly smaller right-bias
+        # - modestly more look-ahead and early-release distance per turn
         try_idx = max(1, min(3, int(try_idx)))
-        lookahead_scale = {1: 1.00, 2: 1.25, 3: 1.50}[try_idx]
-        tol_scale = {1: 1.00, 2: 1.10, 3: 1.20}[try_idx]
-        bias_scale = {1: 1.00, 2: 0.90, 3: 0.80}[try_idx]
+        lookahead_scale = {1: 1.00, 2: 1.05, 3: 1.10}[try_idx]
+        tol_scale = {1: 1.00, 2: 1.00, 3: 1.00}[try_idx]
+        bias_scale = {1: 1.00, 2: 1.00, 3: 1.00}[try_idx]
 
         # Rail safety (if controller exposes client bbox)
         rail_right_limit: Optional[float] = None
@@ -570,39 +737,52 @@ class ClawGame:
                     if nearest is not None:
                         chosen = nearest
 
-                # ------------- release check (predictive) -------------
+                # ------------- release check (predictive, early) -------------
                 released = False
-                if chosen is not None:
-                    cx_target, _ = _center(chosen["xyxy"])
+                dir_sign = 1.0 if vx_ema >= 0.0 else -1.0
+                early_scale = {1: 1.00, 2: 1.05, 3: 1.10}[try_idx]
 
-                    # Tolerance / bias (try-aware scaling)
-                    align_tol = (self.cfg.align_tol_frac_of_claw * tol_scale) * cw
-                    right_bias = (self.cfg.right_bias_frac_of_claw * bias_scale) * cw
-                    target_x = cx_target + right_bias
+                def _should_release_for_target(target_xyxy: XYXY) -> Tuple[bool, float, float, float, float]:
+                    cx_target, _ = _center(target_xyxy)
 
-                    # Look-ahead time = max(loop latency EMA, cfg latency) * try-scale
-                    look_ahead = (
-                        max(loop_dt_ema, self.cfg.latency_comp_s) * lookahead_scale
-                    )
-                    cx_pred = cx_claw + max(
+                    base_early = max(0.0, self.cfg.align_tol_frac_of_claw) * cw
+                    extra_early = max(0.0, self.cfg.right_bias_frac_of_claw) * cw
+                    early_px = (base_early + extra_early) * early_scale
+
+                    target_x = cx_target
+                    release_x = target_x - dir_sign * early_px
+
+                    look_ahead = max(loop_dt_ema, self.cfg.latency_comp_s)
+                    pred_delta = vx_ema * look_ahead
+                    pred_delta = max(
                         -self.cfg.max_pred_px,
-                        min(self.cfg.max_pred_px, vx_ema * look_ahead),
+                        min(self.cfg.max_pred_px, pred_delta),
                     )
+                    cx_pred = cx_claw + pred_delta
 
-                    release_x = target_x - align_tol
-                    decision = cx_pred >= release_x
+                    if dir_sign > 0.0:
+                        decision = cx_pred >= release_x
+                    else:
+                        decision = cx_pred <= release_x
+
+                    return decision, cx_pred, target_x, release_x, early_px
+
+                if chosen is not None:
+                    decision, cx_pred, target_x, release_x, early_px = _should_release_for_target(
+                        chosen["xyxy"]
+                    )
 
                     logger_uma.debug(
-                        "[claw] chk poll=%d | cx=%.1f cx_pred=%.1f vx≈%.1f | tx=%.1f tol=%.1f bias=%.1f "
+                        "[claw] chk poll=%d | dir=%+.1f cx=%.1f cx_pred=%.1f vx≈%.1f | tx=%.1f early=%.1f "
                         "| look=%.3fs (loop=%.3fs) | decide=%s",
                         poll_idx,
+                        dir_sign,
                         cx_claw,
                         cx_pred,
                         vx_ema,
                         target_x,
-                        align_tol,
-                        right_bias,
-                        look_ahead,
+                        early_px,
+                        max(loop_dt_ema, self.cfg.latency_comp_s),
                         loop_dt_ema,
                         decision,
                     )
@@ -618,7 +798,7 @@ class ClawGame:
                             locked=locked_best,
                             notes=(
                                 f"RELEASE align try={try_idx} (cx={cx_claw:.1f}, cxp={cx_pred:.1f}, "
-                                f"tx={target_x:.1f}, tol={align_tol:.1f})"
+                                f"tx={target_x:.1f}, early={early_px:.1f})"
                             ),
                             suffix="release_align",
                             cx_claw=cx_claw,
@@ -637,22 +817,11 @@ class ClawGame:
                         and len(candidates) > 0
                         and len(seen_plushies) >= 3
                     ):
-                        x1_l, _, x2_l, _ = candidates[-1]["xyxy"]
-                        align_tol = (self.cfg.align_tol_frac_of_claw * tol_scale) * cw
-                        right_bias = (
-                            self.cfg.right_bias_frac_of_claw * bias_scale
-                        ) * cw
-
-                        look_ahead = (
-                            max(loop_dt_ema, self.cfg.latency_comp_s) * lookahead_scale
+                        last_xyxy = candidates[-1]["xyxy"]
+                        decision, cx_pred, target_x, release_x, early_px = _should_release_for_target(
+                            last_xyxy
                         )
-                        cx_pred = cx_claw + max(
-                            -self.cfg.max_pred_px,
-                            min(self.cfg.max_pred_px, vx_ema * look_ahead),
-                        )
-
-                        release_x = (x2_l + right_bias) - align_tol
-                        if cx_pred >= release_x:
+                        if decision:
                             logger_uma.info("[claw] RELEASE last plushie fallback.")
                             self._save_debug(
                                 img,
@@ -668,6 +837,7 @@ class ClawGame:
                                 suffix="fallback_last",
                                 cx_claw=cx_claw,
                                 cx_pred=cx_pred,
+                                target_x=target_x,
                                 release_x=release_x,
                             )
                             released = True

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
 import random
 import re
+import shutil
 import subprocess
 import time
 from typing import Optional, Tuple, Union
@@ -23,14 +25,31 @@ class ADBController(IController):
         screen_width: Optional[int] = None,
         screen_height: Optional[int] = None,
         auto_connect: bool = True,
+        auto_select: bool = True,
     ) -> None:
         super().__init__(window_title="", capture_client_only=False)
         self.device = (device or "").strip() or None
         self._screen_width = screen_width
         self._screen_height = screen_height
+        self._adb_executable = self._resolve_adb_executable()
+
+        # If no device provided, optionally pick the first available one.
+        # Initial auto-selection only if no explicit device provided.
+        if self.device is None and auto_select:
+            devices = self._list_devices(raw=False)
+            if devices:
+                self.device = devices[0]
 
         if auto_connect and self.device:
             self._auto_connect_device(self.device)
+            # Post-connect validation; if specified device is not present, fallback.
+            if self.device and self.device not in self._list_devices(raw=False):
+                if auto_select:
+                    fallback = self._list_devices(raw=False)
+                    if fallback:
+                        self.device = fallback[0]
+                # Attempt screen size detection again after fallback
+                # (Will run below as well if width/height unset)
 
         if self._screen_width is None or self._screen_height is None:
             self._detect_screen_size()
@@ -38,37 +57,83 @@ class ADBController(IController):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _adb_command(self, *args: str, text: bool = True, timeout: float = 10.0) -> subprocess.CompletedProcess:
-        cmd = ["adb"]
+    def _resolve_adb_executable(self) -> str:
+        """Return the adb executable path or raise if not found.
+
+        Cross-platform strategy:
+        1. If ADB_EXEC env var is set, prefer that.
+        2. Use shutil.which("adb") to discover in PATH.
+        3. On Windows, attempt typical platform-tools locations.
+        4. Otherwise raise with guidance.
+        """
+        env_path = os.getenv("ADB_EXEC")
+        if env_path and shutil.which(env_path):
+            return env_path
+        which_path = shutil.which("adb")
+        if which_path:
+            return which_path
+        if os.name == "nt":  # Windows fallbacks
+            potential = [
+                os.path.expandvars(r"%LOCALAPPDATA%\Android\sdk\platform-tools\adb.exe"),
+                os.path.expandvars(r"%USERPROFILE%\AppData\Local\Android\sdk\platform-tools\adb.exe"),
+                os.path.expandvars(r"%PROGRAMFILES%\Android\platform-tools\adb.exe"),
+            ]
+            for p in potential:
+                if os.path.isfile(p):
+                    return p
+        raise RuntimeError(
+            "ADB executable not found. Install Android Platform Tools and ensure 'adb' is on PATH (or set ADB_EXEC)."
+        )
+
+    def _adb_command(
+        self,
+        *args: str,
+        text: bool = True,
+        timeout: float = 10.0,
+        retries: int = 2,
+        retry_delay: float = 1.0,
+    ) -> subprocess.CompletedProcess:
+        cmd = [self._adb_executable]
+
         if self.device:
             cmd.extend(["-s", self.device])
         cmd.extend(args)
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=text,
-                timeout=timeout,
-                check=False,
-            )
-        except FileNotFoundError as exc:  # pragma: no cover - adb missing
-            raise RuntimeError(
-                "ADB executable not found. Install Android Platform Tools and ensure 'adb' is on PATH."
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"ADB command timed out: {' '.join(cmd)}") from exc
+        attempts = max(1, int(retries) + 1)
 
-        if result.returncode != 0:
-            stderr = result.stderr if text else result.stderr.decode("utf-8", errors="ignore")
-            raise RuntimeError(f"ADB command failed ({' '.join(cmd)}): {stderr.strip()}")
+        for attempt in range(attempts):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=text,
+                    timeout=timeout,
+                    check=False,
+                )
+            except FileNotFoundError as exc:  # pragma: no cover - adb missing
+                raise RuntimeError(
+                    "ADB executable not found. Install Android Platform Tools and ensure 'adb' is on PATH."
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                if attempt < attempts - 1:
+                    if self.device:
+                        self._auto_connect_device(self.device)
+                    time.sleep(max(0.1, float(retry_delay)))
+                    continue
+                raise RuntimeError(f"ADB command timed out: {' '.join(cmd)}") from exc
 
-        return result
+            if result.returncode != 0:
+                stderr = result.stderr if text else result.stderr.decode("utf-8", errors="ignore")
+                raise RuntimeError(f"ADB command failed ({' '.join(cmd)}): {stderr.strip()}")
+
+            return result
+
+        raise RuntimeError(f"ADB command failed ({' '.join(cmd)}): unknown error")
 
     def _auto_connect_device(self, device: str) -> None:
         try:
             listing = subprocess.run(
-                ["adb", "devices"],
+                [self._adb_executable, "devices"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -76,21 +141,21 @@ class ADBController(IController):
             )
         except Exception:
             return
-
         if listing.returncode == 0 and device in listing.stdout:
             return
-
-        try:
-            subprocess.run(
-                ["adb", "connect", device],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            time.sleep(0.5)
-        except Exception:
-            pass
+        # Only attempt adb connect for host:port patterns (emulators / tcpip devices).
+        if ":" in device:
+            try:
+                subprocess.run(
+                    [self._adb_executable, "connect", device],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                time.sleep(0.5)
+            except Exception:
+                pass
 
     def _detect_screen_size(self) -> None:
         try:
@@ -118,10 +183,10 @@ class ADBController(IController):
         self._screen_width = self._screen_width or 1920
         self._screen_height = self._screen_height or 1080
 
-    def _list_devices(self) -> list[str]:
+    def _list_devices(self, raw: bool = False) -> list[str]:
         try:
             result = subprocess.run(
-                ["adb", "devices"],
+                [self._adb_executable, "devices"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -130,7 +195,19 @@ class ADBController(IController):
             if result.returncode != 0:
                 return []
             lines = result.stdout.strip().splitlines()[1:]
-            return [line.split()[0] for line in lines if "device" in line and "offline" not in line]
+            devices = []
+            for line in lines:
+                parts = line.split()
+                if not parts:
+                    continue
+                serial = parts[0]
+                state = parts[1] if len(parts) > 1 else "unknown"
+                if raw:
+                    devices.append(serial)  # return all for raw mode
+                else:
+                    if state == "device" and "offline" not in line:
+                        devices.append(serial)
+            return devices
         except Exception:
             return []
 

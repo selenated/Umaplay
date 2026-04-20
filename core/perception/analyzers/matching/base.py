@@ -149,7 +149,10 @@ class TemplateMatcherBase:
             if entry.image is not None:
                 pil = entry.image if isinstance(entry.image, Image.Image) else Image.fromarray(entry.image)
             elif entry.path:
-                pil = Image.open(entry.path)
+                # Normalize path for cross-platform compatibility
+                import os
+                normalized_path = str(entry.path).replace('\\', os.sep)
+                pil = Image.open(normalized_path)
             else:
                 raise ValueError("TemplateEntry requires either image or path")
 

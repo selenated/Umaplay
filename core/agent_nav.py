@@ -141,6 +141,11 @@ class AgentNav:
             ):
                 return "RaceDailyRows", {"counts": dict(counts)}
 
+            if nav.has(dets, "shop_clock", conf_min=self._thr["shop_clock"]) or nav.has(
+                dets, "shop_exchange", conf_min=self._thr["shop_exchange"]
+            ):
+                return "DailyRaceShop", {"counts": dict(counts)}
+
             if nav.has(dets, "button_white", conf_min=self._thr["button_back"]) and nav.has(
                 dets, "button_green", conf_min=self._thr["button_green"]
             ):
@@ -269,6 +274,9 @@ class AgentNav:
                     f"[AgentNav] TeamTrials recovery state detected: {screen}"
                 )
                 self.team_trials.resume()
+                if getattr(self.team_trials, "_declined_restore", False):
+                    self.is_running = False
+                    counter = 0
 
             elif self.action == "team_trials" and screen == "TeamTrialsFinished":
                 logger_uma.info("[AgentNav] TeamTrials finished detected")
@@ -283,6 +291,10 @@ class AgentNav:
                 if finalized:
                     self.is_running = False
                     counter = 0
+
+            elif screen == "DailyRaceShop":
+                logger_uma.info("[AgentNav] DailyRace shop detected")
+                self.daily_race.handle_shop_in_place()
 
             elif self.action == "roulette":
                 if self._stop_event.is_set():

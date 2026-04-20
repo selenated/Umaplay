@@ -36,9 +36,22 @@ class LocalYOLOEngine(IDetector):
         self.model = YOLO(self.weights_path)
         if self.use_gpu:
             try:
-                self.model.to("cuda:0")
+                import torch
+                # Check for CUDA or ROCm availability
+                if torch.cuda.is_available():
+                    # Works for both CUDA and ROCm (ROCm uses the same CUDA API)
+                    device = "cuda:0"
+                    if hasattr(torch.version, 'hip') and torch.version.hip is not None:
+                        logger_uma.info("YOLO: Using ROCm (AMD GPU)")
+                    else:
+                        logger_uma.info("YOLO: Using CUDA (NVIDIA GPU)")
+                    self.model.to(device)
+                else:
+                    logger_uma.warning("YOLO: GPU requested but torch.cuda.is_available() is False, using CPU")
+                    self.use_gpu = False
             except Exception as e:
-                logger_uma.error(f"Couldn't set YOLO model to CUDA: {e}")
+                logger_uma.error(f"Couldn't set YOLO model to GPU: {e}")
+                self.use_gpu = False
 
     # ---------- internals ----------
     @staticmethod

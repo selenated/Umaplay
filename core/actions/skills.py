@@ -11,7 +11,10 @@ from PIL import Image
 
 from core.controllers.android import ScrcpyController
 from core.controllers.adb import ADBController
-from core.controllers.bluestacks import BlueStacksController
+try:
+    from core.controllers.bluestacks import BlueStacksController
+except Exception:
+    BlueStacksController = None  # type: ignore
 from core.controllers.base import IController
 from core.perception.ocr.interface import OCRInterface
 from core.perception.yolo.interface import IDetector
@@ -725,7 +728,7 @@ class SkillsFlow:
             )
             # Inertia wait
             time.sleep(0.15)
-        elif isinstance(self.ctrl, BlueStacksController):
+        elif (BlueStacksController is not None) and isinstance(self.ctrl, BlueStacksController):
             xywh = self.ctrl._client_bbox_screen_xywh()
             if not xywh:
                 return

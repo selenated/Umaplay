@@ -883,7 +883,7 @@ def fetch_and_parse_cards(slugs: List[str], card_type: str, skill_lookup: Dict[s
                 try:
                     ir = requests.get(img_url, timeout=12); ir.raise_for_status()
                     ext = os.path.splitext(img_url.split('?')[0])[-1] or ".png"
-                    fname = f"{name}_{attribute}_{rarity}{ext}" if card_type == "support" else f"{name} ({(version or '').replace('_',' ').title()})_profile{ext}"
+                    fname = f"{name}_{attribute}_{rarity}{ext}" if card_type == "support" else f"{name} ({(version).replace('_',' ').title()})_profile{ext}" if version else f"{name}_profile{ext}"
                     sub = os.path.join(img_dir, card_type)
                     os.makedirs(sub, exist_ok=True)
                     with open(os.path.join(sub, fname), "wb") as f:
@@ -932,7 +932,7 @@ def fetch_and_parse_cards(slugs: List[str], card_type: str, skill_lookup: Dict[s
 
         obj = {
             "type": "support" if card_type == "support" else "trainee",
-            "name": name if card_type == "support" else (f"{name} ({(version or '').replace('_',' ').title()})" if version else name),
+            "name": name if card_type == "support" else (f"{name} ({(version).replace('_',' ').title()})" if version else name),
             "rarity": rarity if card_type == "support" else "None",
             "attribute": attribute if card_type == "support" else "None",
             "id": f"{name}_{attribute}_{rarity}".strip("_") if card_type == "support" else f"{name}_profile",

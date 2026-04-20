@@ -75,6 +75,8 @@ class RaceFlow:
             "retry_clicks": 0,
             "retry_skipped": 0,
             "wins_or_no_loss": 0,
+            "retry_transition_timeouts": 0,
+            "lobby_view_failures": 0,
         }
         self._waiting_for_manual_retry_decision = False
         self._last_failure_reason: RaceFailureReason = RaceFailureReason.NONE
@@ -209,23 +211,11 @@ class RaceFlow:
     def _handle_retry_transition(self) -> None:
         """Clear alarm-clock confirmations and wait until lobby buttons reappear."""
         logger_uma.debug("[race] Handling retry transition interstitials.")
-        confirm_texts = ("USE", "USE ITEM", "TRY AGAIN", "RACE", "YES")
+        confirm_texts = ("USE", "USE ITEM", "TRY AGAIN", "YES")
         cleanup_texts = ("OK", "CONFIRM")
         deadline = time.time() + 10.0
 
         while time.time() < deadline:
-            if self.waiter.try_click_once(
-                classes=("button_green",),
-                texts=confirm_texts + cleanup_texts,
-                prefer_bottom=False,
-                allow_greedy_click=False,
-                forbid_texts=("NEXT",),
-                tag="race_try_again_confirm",
-            ):
-                logger_uma.debug("[race] Clicked retry interstitial confirmation.")
-                time.sleep(0.45)
-                continue
-
             if self.waiter.seen(
                 classes=("button_white",),
                 texts=("VIEW RESULTS",),
@@ -242,8 +232,21 @@ class RaceFlow:
                 logger_uma.debug("[race] Race button ready after retry.")
                 return
 
+            if self.waiter.try_click_once(
+                classes=("button_green",),
+                texts=confirm_texts + cleanup_texts,
+                prefer_bottom=False,
+                allow_greedy_click=False,
+                forbid_texts=("NEXT",),
+                tag="race_try_again_confirm",
+            ):
+                logger_uma.debug("[race] Clicked retry interstitial confirmation.")
+                time.sleep(0.45)
+                continue
+
             time.sleep(0.35)
 
+        self._race_result_counters["retry_transition_timeouts"] += 1
         logger_uma.warning("[race] Retry transition timed out; continuing anyway.")
 
     def _deduplicate_stars(self, stars: List[DetectionDict]) -> List[DetectionDict]:
@@ -287,9 +290,11 @@ class RaceFlow:
         img, dets = self._collect("race_view_btn")
         whites = find(dets, "button_white")
         if not whites:
+            logger_uma.debug("[race] No button_white candidates for View Results.")
             return None
 
         best_d, best_s = None, 0.0
+        candidates_info = []
         for d in whites:
             txt = (self.ocr.text(crop_pil(img, d["xyxy"])) or "").strip()
             score = max(
@@ -297,6 +302,13 @@ class RaceFlow:
             )
             if score > best_s and score > 0.01:
                 best_d, best_s = d, score
+            candidates_info.append((txt, score))
+        if best_d is None and candidates_info:
+            logger_uma.debug(
+                "[race] View Results button candidates had low OCR scores; best=%.3f details=%s",
+                best_s,
+                candidates_info,
+            )
         return best_d
 
     def _pick_race_square(
@@ -734,9 +746,12 @@ class RaceFlow:
         
         # If still not found after all retries, abort the operation
         if view_btn is None:
+            self._race_result_counters["lobby_view_failures"] += 1
             logger_uma.error(
                 "View Results button not found after ~15s of retries. "
-                "Cannot determine lobby state. Aborting race operation."
+                "Cannot determine lobby state. Aborting race operation. "
+                "counters=%s",
+                self._race_result_counters,
             )
             return False
 
@@ -929,7 +944,7 @@ class RaceFlow:
             logger_uma.debug(
                 "[race] Looking for button_green 'Next' button. Shown after race."
             )
-            self.waiter.click_when(
+            ck1 = self.waiter.click_when(
                 classes=("button_green",),
                 texts=("NEXT",),
                 forbid_texts=("TRY AGAIN",),
@@ -945,7 +960,7 @@ class RaceFlow:
                 "[race] Looking for race_after_next special button. When Pyramid"
             )
 
-            self.waiter.click_when(
+            ck2 = self.waiter.click_when(
                 classes=("race_after_next",),
                 texts=("NEXT",),
                 prefer_bottom=True,
@@ -953,6 +968,16 @@ class RaceFlow:
                 clicks=random.randint(2, 4),
                 tag="race_after",
             )
+
+            if not ck1 and not ck2:
+                # quick and dirty fallback for MANT
+                screen_width = img.width
+                screen_height = img.height
+                cx = screen_width * 0.5
+                y = screen_height * 0.1
+
+                logger_uma.debug("[race] Trying MANT fallback click");
+                self.ctrl.click_xyxy_center((cx, y, cx, y), clicks=1)
 
             # Optional: Confirm 'Next'. TODO understand when to use
             # self.waiter.click_when(

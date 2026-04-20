@@ -2,12 +2,28 @@
 import time
 from typing import Any, Optional, Tuple, Union
 
-import pyautogui
-import pygetwindow as gw
+# Import wine_helper FIRST to patch pygetwindow before it's imported
+try:
+    from core.utils import wine_helper
+except ImportError:
+    pass
 
-# Requires pywin32
-import win32con
-import win32gui
+from core.controllers.base import pyautogui
+from core.controllers.window_utils import (
+    get_all_windows,
+    get_windows_with_title,
+    find_window_by_process_name
+)
+
+# Optional pywin32 on Windows; preferred when available (Wine uses pywin32-ctypes)
+try:
+    import win32con  # type: ignore
+    import win32gui  # type: ignore
+    HAS_WIN32 = True
+except Exception:
+    win32con = None  # type: ignore
+    win32gui = None  # type: ignore
+    HAS_WIN32 = False
 
 from core.controllers.base import IController, RegionXYWH
 from core.types import XYXY
@@ -29,12 +45,45 @@ class SteamController(IController):
 
     # --- window discovery ---
     def _find_window(self):
-        wins = [
-            w
-            for w in gw.getWindowsWithTitle(self.window_title)
-            if w.title.strip() == self.window_title
-        ]
-        return wins[0] if wins else None
+        logger = __import__('logging').getLogger(__name__)
+        # First try exact title match
+        try:
+            win_list = get_windows_with_title(self.window_title)
+            if win_list:
+                # Prefer exact match
+                exact = [w for w in win_list if getattr(w, "title", "").strip() == self.window_title]
+                if exact:
+                    return exact[0]
+                return win_list[0]
+        except Exception as e:
+            logger.debug(f"[Steam] Title-based window search failed: {e}")
+        
+        # Fallback: enumerate all windows
+        wins = get_all_windows()
+        exact = [w for w in wins if getattr(w, "title", "").strip() == self.window_title]
+        if exact:
+            return exact[0]
+        
+        # Try process-based detection for Steam games
+        # Steam games on Linux often run under proton/wine processes with game-specific names
+        for process_hint in ["UmamusumePretty", "Umamusume", self.window_title, "steam", "proton", "wine"]:
+            try:
+                w = find_window_by_process_name(process_hint)
+                if w:
+                    title = (getattr(w, "title", "") or "").strip().lower()
+                    wm_class = (getattr(w, "wm_class", "") or "").strip().lower()
+                    target = self.window_title.lower().strip()
+                    # Avoid accepting empty titles ("", None), which can match everything.
+                    if title and (target in title or title in target):
+                        logger.debug(f"[Steam] Found by process name '{process_hint}': title={getattr(w, 'title', None)}")
+                        return w
+                    if wm_class and (target in wm_class or wm_class in target):
+                        logger.debug(f"[Steam] Found by process name '{process_hint}': title={getattr(w, 'title', None)}")
+                        return w
+            except Exception as e:
+                logger.debug(f"[Steam] Process-based detection for '{process_hint}' failed: {e}")
+        
+        return None
 
     def _get_hwnd(self) -> Optional[int]:
         w = self._find_window()
@@ -49,12 +98,23 @@ class SteamController(IController):
 
             # Restore if minimized
             if w.isMinimized:
-                win32gui.ShowWindow(int(w._hWnd), win32con.SW_RESTORE)
-                time.sleep(0.15)
+                if HAS_WIN32:
+                    win32gui.ShowWindow(int(w._hWnd), win32con.SW_RESTORE)
+                    time.sleep(0.15)
+                else:
+                    try:
+                        w.restore()
+                        time.sleep(0.15)
+                    except Exception:
+                        # Ignore errors if restore fails; fallback restore is best-effort only.
+                        pass
 
             # Bring to foreground
             try:
-                win32gui.SetForegroundWindow(int(w._hWnd))
+                if HAS_WIN32:
+                    win32gui.SetForegroundWindow(int(w._hWnd))
+                else:
+                    w.activate()
             except Exception:
                 # Fallback via minimize/restore trick
                 w.minimize()
@@ -80,27 +140,43 @@ class SteamController(IController):
         Returns (left, top, width, height) of the *client area* in SCREEN coordinates.
         """
         hwnd = self._get_hwnd()
-        if (
-            not hwnd
-            or not win32gui.IsWindow(hwnd)
-            or not win32gui.IsWindowVisible(hwnd)
-        ):
+        if not hwnd:
             return None
-
-        # Client rect is (0,0)-(w,h) in client coords
-        try:
-            left_top = win32gui.ClientToScreen(hwnd, (0, 0))
-            right_bottom = win32gui.ClientToScreen(
-                hwnd, win32gui.GetClientRect(hwnd)[2:]
-            )
-            left, top = left_top
-            right, bottom = right_bottom
-            width, height = max(0, right - left), max(0, bottom - top)
-            if width == 0 or height == 0:
+        
+        if HAS_WIN32:
+            try:
+                if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                    return None
+            except Exception:
                 return None
-            return (left, top, width, height)
-        except Exception:
-            return None
+
+            # Client rect is (0,0)-(w,h) in client coords
+            try:
+                left_top = win32gui.ClientToScreen(hwnd, (0, 0))
+                right_bottom = win32gui.ClientToScreen(
+                    hwnd, win32gui.GetClientRect(hwnd)[2:]
+                )
+                left, top = left_top
+                right, bottom = right_bottom
+                width, height = max(0, right - left), max(0, bottom - top)
+                if width == 0 or height == 0:
+                    return None
+                return (left, top, width, height)
+            except Exception:
+                return None
+        else:
+            # Linux: use window geometry directly
+            try:
+                w = self._find_window()
+                if not w:
+                    return None
+                left, top = int(w.left), int(w.top)
+                width, height = int(w.width), int(w.height)
+                if width == 0 or height == 0:
+                    return None
+                return (left, top, width, height)
+            except Exception:
+                return None
 
     def scroll(
         self,

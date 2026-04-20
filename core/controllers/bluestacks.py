@@ -5,6 +5,12 @@ import random
 import time
 from typing import Optional, Tuple, Union
 
+# Import wine_helper FIRST to patch pygetwindow before it's imported
+try:
+    from core.utils import wine_helper
+except ImportError:
+    pass
+
 import pyautogui
 import pygetwindow as gw
 from PIL import ImageGrab
@@ -12,7 +18,7 @@ import ctypes
 import win32api
 import win32process
 
-# Requires pywin32
+# Requires pywin32-ctypes (Wine-compatible)
 import win32con
 import win32gui
 

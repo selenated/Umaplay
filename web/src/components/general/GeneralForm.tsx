@@ -203,7 +203,7 @@ export default function GeneralForm() {
               ))}
             </Select>
           }
-          info="Select the platform/controller the agent should target."
+          info="Select the platform/controller the agent should target. Steam mode works on Windows and Linux (via Wine)."
         />
 
         {g.mode === 'scrcpy' && (

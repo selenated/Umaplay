@@ -5,7 +5,6 @@ import threading
 import time
 import argparse
 import webbrowser
-import keyboard
 import uvicorn
 import subprocess
 import sys
@@ -13,12 +12,20 @@ from pathlib import Path
 import shutil
 import queue
 
+try:
+    import keyboard as kb  # type: ignore
+except Exception:  # pragma: no cover - optional dependency, handled by keyboard_handler
+    kb = None  # type: ignore
+
+from core.utils import keyboard_handler
+
 from core.actions.ura.agent import AgentURA
 from core.actions.unity_cup.agent import AgentUnityCup
 from core.agent_scenario import AgentScenario
 from core.utils.logger import logger_uma, setup_uma_logging
 from core.settings import Settings
 from core.agent_nav import AgentNav
+from core.utils.hotkey_manager import get_hotkey_manager
 
 from server.main import app
 from server.utils import (
@@ -335,7 +342,8 @@ class BotState:
                             max_iterations=getattr(Settings, "MAX_ITERATIONS", None),
                         )
                 except Exception as e:
-                    if "connection aborted" in str(e).lower():
+                    msg = str(e).lower()
+                    if "connection aborted" in msg or "adb command timed out" in msg:
                         logger_uma.info(
                             "Trying to recover from bot crash, connection to host was lost"
                         )
@@ -504,8 +512,8 @@ class NavState:
 # ---------------------------
 def hotkey_loop(bot_state: BotState, nav_state: NavState):
     # Support configured hotkey and F2 as backup for Player; F7/F8 for AgentNav
-    configured = str(getattr(Settings, "HOTKEY", "F2")).upper()
-    keys_bot = sorted(set([configured, "F2"]))
+    configured = str(getattr(Settings, "HOTKEY", "F2") or "F2").upper()
+    keys_bot = [configured]
     keys_nav = ["F7", "F8", "F9"]
     logger_uma.info(f"[HOTKEY] Run bot in Scenario (e.g. URA, Unity Cup): press {', '.join(keys_bot)} to start/stop.")
     logger_uma.info("[HOTKEY] AgentNav: press F7=TeamTrials, F8=DailyRaces")
@@ -558,6 +566,34 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
             )
         except Exception as exc:
             logger_uma.debug("[HOTKEY] Failed to display preset overlay: %s", exc)
+
+    def _show_scenario_stopped_overlay_if_needed():
+        if not getattr(Settings, "SHOW_PRESET_OVERLAY", False):
+            return
+        try:
+            cfg = load_config() or {}
+            try:
+                Settings._last_config = dict(cfg)
+            except Exception:
+                pass
+        except Exception:
+            cfg = Settings._last_config or {}
+        try:
+            general = cfg.get("general") or {}
+            active_scenario = general.get("activeScenario", "ura")
+            scenario_label = active_scenario.replace("_", " ").title()
+            duration = getattr(Settings, "PRESET_OVERLAY_DURATION", 5.0)
+            show_preset_overlay(
+                f"Scenario: {scenario_label}\nRequesting stop...",
+                duration=max(1.0, float(duration or 0.0)),
+                x=32,
+                y="center",
+                background="#F97316",
+            )
+        except Exception as exc:
+            logger_uma.debug(
+                "[HOTKEY] Failed to display stop overlay: %s", exc
+            )
 
     def _select_scenario_before_start() -> bool:
         try:
@@ -644,12 +680,16 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
             return
         last_ts_toggle = now
 
-        if not bot_state.running:
+        was_running = bot_state.running
+        if not was_running:
             if not _select_scenario_before_start():
                 return
+            _show_preset_overlay_if_needed()
 
-        _show_preset_overlay_if_needed()
         bot_state.toggle(source=source)
+
+        if was_running:
+            _show_scenario_stopped_overlay_if_needed()
 
     def _debounced_team(source: str):
         nonlocal last_ts_team
@@ -717,17 +757,20 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
             nav_state.start(action="roulette")
 
     # Try to register hooks
+    hotkey_mgr = get_hotkey_manager()
+    
     for k in keys_bot:
         try:
             logger_uma.debug(f"[HOTKEY] Registering hook for {k}…")
-            keyboard.add_hotkey(
+            success = hotkey_mgr.add_hotkey(
                 k,
                 lambda key=k: event_q.put(("toggle", f"hook:{key}")),
                 suppress=False,
                 trigger_on_release=True,
             )
-            hooked_keys.add(k)
-            logger_uma.info(f"[HOTKEY] Hook active for '{k}'.")
+            if success:
+                hooked_keys.add(k)
+                logger_uma.info(f"[HOTKEY] Hook active for '{k}'.")
         except PermissionError as e:
             logger_uma.warning(
                 f"[HOTKEY] PermissionError registering '{k}'. On Windows you may need to run as Administrator. {e}"
@@ -738,14 +781,15 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
     for k, fn_name in [("F7", "team"), ("F8", "daily"), ("F9", "roulette")]:
         try:
             logger_uma.debug(f"[HOTKEY] Registering hook for {k}…")
-            keyboard.add_hotkey(
+            success = hotkey_mgr.add_hotkey(
                 k,
                 lambda key=k, name=fn_name: event_q.put((name, f"hook:{key}")),
                 suppress=False,
                 trigger_on_release=True,
             )
-            hooked_keys.add(k)
-            logger_uma.info(f"[HOTKEY] Hook active for '{k}'.")
+            if success:
+                hooked_keys.add(k)
+                logger_uma.info(f"[HOTKEY] Hook active for '{k}'.")
         except PermissionError as e:
             logger_uma.warning(
                 f"[HOTKEY] PermissionError registering '{k}'. On Windows you may need to run as Administrator. {e}"
@@ -753,10 +797,12 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
         except Exception as e:
             logger_uma.warning(f"[HOTKEY] Could not register '{k}': {e}")
 
-    # Polling fallback (works even when hooks fail)
+    # Polling fallback (works even when hooks fail, and is the primary method on Linux)
     # With increased debounce (0.8s), both hook and poll can coexist safely
     if hooked_keys:
         logger_uma.debug(f"[HOTKEY] Hooks registered for: {hooked_keys}. Polling also active with 0.8s debounce to prevent race condition.")
+    else:
+        logger_uma.debug("[HOTKEY] No hooks registered. Using polling only.")
     logger_uma.debug("[HOTKEY] Polling fallback thread running…")
     try:
         while True:
@@ -778,7 +824,7 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
             fired = False
             for k in keys_bot:
                 try:
-                    if keyboard.is_pressed(k):
+                    if hotkey_mgr.is_pressed(k):
                         logger_uma.debug(f"[HOTKEY] Poll detected '{k}'.")
                         _debounced_toggle(f"poll:{k}")
                         fired = True
@@ -788,7 +834,7 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
             # Nav keys
             for k, fn in [("F7", _debounced_team), ("F8", _debounced_daily), ("F9", _debounced_roulette)]:
                 try:
-                    if keyboard.is_pressed(k):
+                    if hotkey_mgr.is_pressed(k):
                         logger_uma.debug(f"[HOTKEY] Poll detected '{k}'.")
                         fn(f"poll:{k}")
                         fired = True
@@ -801,8 +847,8 @@ def hotkey_loop(bot_state: BotState, nav_state: NavState):
         pass
     finally:
         try:
-            keyboard.unhook_all_hotkeys()
-            logger_uma.debug("[HOTKEY] Unhooked all hotkeys.")
+            hotkey_mgr.stop()
+            logger_uma.debug("[HOTKEY] Stopped hotkey manager.")
         except Exception:
             pass
 
